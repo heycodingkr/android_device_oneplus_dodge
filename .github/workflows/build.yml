@@ -73,7 +73,19 @@ jobs:
           restore-keys: manifest-
 
       # ── 2. LineageOS 소스 ──
-      # 주의: 매니페스트 브랜치명은 'lineage-23.2' (버전만 쓰면 pathspec 에러)
+      # 주의 1: 매니페스트 브랜치명은 'lineage-23.2' (버전만 쓰면 pathspec 에러)
+      # 주의 2: repo 도구는 GitHub Actions 이미지에 없으므로 공식 스크립트로 설치
+      - name: Install repo tool
+        run: |
+          set -e
+          mkdir -p ~/bin
+          export PATH=~/bin:$PATH
+          curl -sL https://storage.googleapis.com/git-repo-downloads/repo \
+               -o ~/bin/repo
+          chmod +x ~/bin/repo
+          ~/bin/repo --version
+          echo "$HOME/bin" >> $GITHUB_PATH
+
       - name: Initialize LineageOS source
         run: |
           set -e
