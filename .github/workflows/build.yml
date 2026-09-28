@@ -93,8 +93,8 @@ jobs:
           echo "manifest branch: $MB"
           mkdir -p ~/lineage
           cd ~/lineage
-          git init -q
-          git clone --depth 1 --branch "$MB" https://github.com/LineageOS/android.git .repo/manifests
+          # repo init 이 .repo/manifests 를 직접 만들므로 git init 을 먼저 하면
+          # 'unsupported checkout state' 로 실패한다. 클론도 repo init 위임.
           repo init -u https://github.com/LineageOS/android.git \
                    -b "$MB" \
                    --git-lfs
