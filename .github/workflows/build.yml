@@ -19,6 +19,12 @@ on:
         default: 'userdebug'
         type: choice
         options: [userdebug, user]
+      bootanim_url:
+        description: 'bootanimation.zip 다운로드 URL (비우면 repo variable 사용)'
+        required: false
+      bootanim_sha:
+        description: 'bootanimation.zip SHA256 (비우면 repo variable 사용)'
+        required: false
 
   schedule:
     # 매일 03:00 UTC (LineageOS nightly 빌드 이후)
@@ -124,30 +130,42 @@ jobs:
           mka bacon -j$(nproc)
 
       # ── 4. bootanimation 주입 ★ 핵심 단계 ──
-      # 체크아웃: bootanimation.zip 은 base64 로 인코딩해 env 로 전달
-      # (저장소 크기 1.4MB → base64 ~500KB, env 한도 내)
-      - name: Inject MeshAIOS bootanimation
+      # zip 을 git-lfs 없이 저장소에 커밋하지 않고, 매 빌드 시점에
+      # 원격에서 받아온다. (Actions secret 48KB 제한 우회)
+      #
+      # 옵션 A: bootanimation/assets/releases 에 zip 저장 후 curl
+      # 옵션 B: 클론 가능한 별도 공개 저장소 (bootanimation 분기)
+      - name: Fetch MeshAIOS bootanimation
+        run: |
+          set -e
+          URL="${BOOTANIM_URL}"
+          mkdir -p /tmp/ba
+          curl -sL --retry 3 --max-time 120 -o /tmp/ba/bootanimation.zip "$URL"
+          test -s /tmp/ba/bootanimation.zip || { echo "ERROR: download failed"; exit 1; }
+          sha256sum /tmp/ba/bootanimation.zip
+          echo "expected: $BOOTANIM_SHA"
+          echo "$BOOTANIM_SHA  /tmp/ba/bootanimation.zip" | sha256sum -c -
         env:
-          BA_B64: ${{ secrets.MESH_BOOTANIMATION_B64 }}
+          BOOTANIM_URL: ${{ inputs.bootanim_url || vars.MESH_BOOTANIM_URL }}
+          BOOTANIM_SHA: ${{ inputs.bootanim_sha || vars.MESH_BOOTANIM_SHA }}
+
+      - name: Inject bootanimation into product/system
         run: |
           set -e
           cd ~/lineage/out/target/product/${{ env.DEVICE }}
 
-          test -n "$BA_B64" || { echo "ERROR: secret MESH_BOOTANIMATION_B64 미설정"; exit 1; }
-
-          # 부팅애니메이션이 product / system 양쪽에 들어갈 수 있다
           test -d product/media || { echo "ERROR: product/media not found"; exit 1; }
           mkdir -p system/media
 
-          echo "$BA_B64" | base64 -d > product/media/bootanimation.zip
-          cp product/media/bootanimation.zip system/media/bootanimation.zip
+          cp /tmp/ba/bootanimation.zip product/media/bootanimation.zip
+          cp /tmp/ba/bootanimation.zip system/media/bootanimation.zip
 
           rm -f product/media/bootanimation-dark.zip system/media/bootanimation-dark.zip
           ln -sf bootanimation.zip product/media/bootanimation-dark.zip
           ln -sf bootanimation.zip system/media/bootanimation-dark.zip
 
           ls -la product/media/ system/media/
-          sha256sum product/media/bootanimation.zip
+          sha256sum product/media/bootanimation.zip system/media/bootanimation.zip
 
       - name: Repack images
         run: |
