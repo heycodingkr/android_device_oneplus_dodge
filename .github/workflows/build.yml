@@ -73,15 +73,18 @@ jobs:
           restore-keys: manifest-
 
       # ── 2. LineageOS 소스 ──
+      # 주의: 매니페스트 브랜치명은 'lineage-23.2' (버전만 쓰면 pathspec 에러)
       - name: Initialize LineageOS source
         run: |
+          set -e
+          MB=lineage-${{ matrix.version }}
+          echo "manifest branch: $MB"
           mkdir -p ~/lineage
           cd ~/lineage
           git init -q
-          git clone --depth 1 https://github.com/LineageOS/android.git .repo/manifests
-          git -C .repo/manifests checkout -q ${{ env.MESH_VERSION }}
+          git clone --depth 1 --branch "$MB" https://github.com/LineageOS/android.git .repo/manifests
           repo init -u https://github.com/LineageOS/android.git \
-                   -b ${{ env.MESH_VERSION }} \
+                   -b "$MB" \
                    --git-lfs
           repo sync -c -j$(nproc) --no-clone-bundle --optimized-fetch --force-sync
 
