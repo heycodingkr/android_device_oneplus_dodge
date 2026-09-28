@@ -1,0 +1,193 @@
+name: MeshAIOS Build
+
+# LineageOS 23.2 (Android 16) 기반 MeshAIOS 빌드
+# - bootanimation.zip 주입 (Phase 2 핵심)
+# - 산출물: sideload 가능한 signed zip
+#
+# 주의: GitHub Actions 실행 시간 제한 6시간.
+#       LineageOS full 빌드는 보통 2~4시간이나 환경에 따라 timeout 가능.
+#       timeout 시 대안 = git-coderepos (ROADMAP Phase 2 참조)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'LineageOS 버전 (예: 23.2)'
+        default: '23.2'
+      build_type:
+        description: 'userdebug (root 가능) / user (일반)'
+        default: 'userdebug'
+        type: choice
+        options: [userdebug, user]
+
+  schedule:
+    # 매일 03:00 UTC (LineageOS nightly 빌드 이후)
+    - cron: '0 3 * * *'
+
+env:
+  MESH_VERSION: '23.2'
+  DEVICE: 'dodge'
+  BOOTANIM_SRC: 'meshaios/bootanimation/dist/bootanimation.zip'
+
+jobs:
+  build:
+    name: Build LineageOS ${{ matrix.version }}-${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['23.2']
+        build_type: [userdebug]
+
+    steps:
+      # ── 1. 툴체인 준비 ──
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: "meshaios-${{ matrix.version }}-${{ matrix.build_type }}"
+
+      - name: Cache repo manifest
+        uses: actions/cache@v4
+        with:
+          path: '.repo/manifests'
+          key: manifest-${{ hashFiles('.repo/manifests/*.xml') }}
+          restore-keys: manifest-
+
+      # ── 2. LineageOS 소스 ──
+      - name: Initialize LineageOS source
+        run: |
+          mkdir -p ~/lineage
+          cd ~/lineage
+          git init -q
+          git clone --depth 1 https://github.com/LineageOS/android.git .repo/manifests
+          git -C .repo/manifests checkout -q ${{ env.MESH_VERSION }}
+          repo init -u https://github.com/LineageOS/android.git \
+                   -b ${{ env.MESH_VERSION }} \
+                   --git-lfs
+          repo sync -c -j$(nproc) --no-clone-bundle --optimized-fetch --force-sync
+
+      - name: Inject MeshAIOS repos (fork)
+        run: |
+          cd ~/lineage
+          # 포크한 저장소를 upstream 대신 사용
+          git config --global url."https://github.com/heycodingkr/".insteadOf "https://github.com/LineageOS/"
+          repo sync -c -j$(nproc) --no-clone-bundle --optimized-fetch \
+                    -p android_device_oneplus_dodge \
+                    -p android_device_oneplus_sm8750-common \
+                    -p android_hardware_oplus \
+                    -p android_kernel_oneplus_sm8750 \
+                    -p android_kernel_oneplus_sm8750-devicetrees
+          git config --global --unset url."https://github.com/heycodingkr/".insteadOf
+
+      - name: Extract vendor blobs from artifact
+        # extract-files.py 는 기기 연결이 필요하므로 GitHub Actions 에서 불가.
+        # 미리 추출한 blob 을 아티팩트로 받아 device/ 에 배치한다.
+        #   작업: adb 연결 → extract-files.py 실행 → out/vendor/*.img 생성
+        #   저장: Actions 아티팩트로 등록 → 여기서 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: meshaios-vendor-blobs
+          path: ~/lineage/vendor-blobs
+        continue-on-error: true
+
+      - name: Place vendor blobs
+        run: |
+          if [ -d ~/lineage/vendor-blobs ] && [ -n "$(ls -A ~/lineage/vendor-blobs 2>/dev/null)" ]; then
+            mkdir -p ~/lineage/vendor/lineage
+            cp ~/lineage/vendor-blobs/* ~/lineage/vendor/lineage/ 2>/dev/null || true
+            echo "vendor blobs placed: $(ls ~/lineage/vendor/lineage | wc -l) files"
+          else
+            echo "WARNING: vendor blobs 아티팩트 없음 — 빌드가 실패할 수 있음"
+            echo "  prepare: adb 연결 상태에서 extract-files.py 를 실행해 아티팩트로 등록"
+          fi
+
+      # ── 3. build env ──
+      - name: Set up build env
+        run: |
+          source build/envsetup.sh
+          # target build: user/userdebug/userdebug-eng 등
+          TB=LineageOS
+          lunch ${{ env.DEVICE }}-${TB}-${{ matrix.build_type }}
+          mka bacon -j$(nproc)
+
+      # ── 4. bootanimation 주입 ★ 핵심 단계 ──
+      # 체크아웃: bootanimation.zip 은 base64 로 인코딩해 env 로 전달
+      # (저장소 크기 1.4MB → base64 ~500KB, env 한도 내)
+      - name: Inject MeshAIOS bootanimation
+        env:
+          BA_B64: ${{ secrets.MESH_BOOTANIMATION_B64 }}
+        run: |
+          set -e
+          cd ~/lineage/out/target/product/${{ env.DEVICE }}
+
+          test -n "$BA_B64" || { echo "ERROR: secret MESH_BOOTANIMATION_B64 미설정"; exit 1; }
+
+          # 부팅애니메이션이 product / system 양쪽에 들어갈 수 있다
+          test -d product/media || { echo "ERROR: product/media not found"; exit 1; }
+          mkdir -p system/media
+
+          echo "$BA_B64" | base64 -d > product/media/bootanimation.zip
+          cp product/media/bootanimation.zip system/media/bootanimation.zip
+
+          rm -f product/media/bootanimation-dark.zip system/media/bootanimation-dark.zip
+          ln -sf bootanimation.zip product/media/bootanimation-dark.zip
+          ln -sf bootanimation.zip system/media/bootanimation-dark.zip
+
+          ls -la product/media/ system/media/
+          sha256sum product/media/bootanimation.zip
+
+      - name: Repack images
+        run: |
+          source build/envsetup.sh
+          cd ~/lineage/out/target/product/${{ env.DEVICE }}
+          # bootanimation.zip 이 product.img 에 포함되어야 함
+          make PRODUCT=${{ env.DEVICE }} PRODUCT_USE_SOONG=true \
+               systemimage productimage system_extimage vendor_bootimage \
+               bootimage dtboimage
+
+      # ── 5. ZIP 패키징 ──
+      - name: Create flashable zip
+        uses: LineageOS/gh-actions-gen-zip@v2
+        with:
+          name: MeshAIOS
+          device: ${{ env.DEVICE }}
+          include_bt: true
+          include_dt: true
+          include_tv: false
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: meshaios-${{ matrix.version }}-${{ matrix.build_type }}
+          path: ~/lineage/out/artifacts/MeshAIOS-*.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      # ── 6. 결과 요약 ──
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### MeshAIOS Build"
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "|---|---|"
+            echo "| LineageOS | ${{ matrix.version }} (Android 16) |"
+            echo "| 기기 | ${{ env.DEVICE }} (CPH2653) |"
+            echo "| 빌드 타입 | ${{ matrix.build_type }} |"
+            echo "| bootanimation | $(ls -la ~/lineage/out/target/product/${{ env.DEVICE }}/product/media/bootanimation.zip 2>/dev/null | awk '{print $5" bytes"}' || echo '미주입') |"
+            echo ""
+          } >> $GITHUB_STEP_SUMMARY
