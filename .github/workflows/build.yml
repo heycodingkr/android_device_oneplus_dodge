@@ -177,20 +177,38 @@ jobs:
                bootimage dtboimage
 
       # ── 5. ZIP 패키징 ──
-      - name: Create flashable zip
-        uses: LineageOS/gh-actions-gen-zip@v2
-        with:
-          name: MeshAIOS
-          device: ${{ env.DEVICE }}
-          include_bt: true
-          include_dt: true
-          include_tv: false
+      # LineageOS/actions 저장소가 없어져 gh-actions-gen-zip 액션은 더 이상 없다
+      # (2026-09 실측: 404). brunch 가 이미 서명된 lineage-*.zip 을 만들므로
+      # 그 산출물을 그대로 사용한다.
+      - name: Package and upload sideload zip
+        run: |
+          set -e
+          source build/envsetup.sh
+          OUT="$OUT/target/product/${{ env.DEVICE }}"
+          cd "$OUT"
+
+          SRC=$(ls lineage-*.zip 2>/dev/null | head -1)
+          test -n "$SRC" || { echo "ERROR: brunch 가 lineage-*.zip 을 만들지 않음"; exit 1; }
+
+          DEST="$OUT/../MeshAIOS-23.2-${{ matrix.build_type }}-dodge.zip"
+          DEST=$(realpath "$DEST")
+          cp "$SRC" "$DEST"
+
+          echo "--- bootanimation 검증 ---"
+          ACTUAL=$(sha256sum product/media/bootanimation.zip 2>/dev/null | cut -d' ' -f1 || echo "없음")
+          EXPECTED="${{ vars.MESH_BOOTANIM_SHA }}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          [ -n "$ACTUAL" ] && [ "$ACTUAL" = "$EXPECTED" ] && echo "✅ 일치" || echo "⚠️ 불일치 (빌드는 계속)"
+
+          ls -lh "$DEST"
+          echo "DEST_PATH=$DEST" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: meshaios-${{ matrix.version }}-${{ matrix.build_type }}
-          path: ~/lineage/out/artifacts/MeshAIOS-*.zip
+          path: ${{ env.DEST_PATH }}
           retention-days: 14
           if-no-files-found: error
 
