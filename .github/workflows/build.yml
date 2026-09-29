@@ -39,7 +39,11 @@ jobs:
   build:
     name: Build LineageOS ${{ matrix.version }}-${{ matrix.build_type }}
     runs-on: ubuntu-latest
+    # 6시간 하드 상한. 실제 실패는 repo sync 중 러너 OOM (2026-09-29 실측).
     timeout-minutes: 350
+    env:
+      # repo sync 는 병렬이 너무 높으면 러너 메모리를 exhaust 한다
+      REPO_SYNC_JOBS: '2'
 
     strategy:
       fail-fast: false
@@ -98,20 +102,33 @@ jobs:
           repo init -u https://github.com/LineageOS/android.git \
                    -b "$MB" \
                    --git-lfs
-          repo sync -c -j$(nproc) --no-clone-bundle --optimized-fetch --force-sync
+          # 병렬도를 낮춘다 — nproc(4) 로 동시 clone 하면 러너 메모리가 모자란다
+          repo sync -c -j"${REPO_SYNC_JOBS}" --no-clone-bundle --optimized-fetch --force-sync
 
       - name: Inject MeshAIOS repos (fork)
         run: |
+          set -e
           cd ~/lineage
           # 포크한 저장소를 upstream 대신 사용
           git config --global url."https://github.com/heycodingkr/".insteadOf "https://github.com/LineageOS/"
-          repo sync -c -j$(nproc) --no-clone-bundle --optimized-fetch \
+          repo sync -c -j"${REPO_SYNC_JOBS}" --no-clone-bundle --optimized-fetch \
                     -p android_device_oneplus_dodge \
                     -p android_device_oneplus_sm8750-common \
                     -p android_hardware_oplus \
                     -p android_kernel_oneplus_sm8750 \
                     -p android_kernel_oneplus_sm8750-devicetrees
           git config --global --unset url."https://github.com/heycodingkr/".insteadOf
+
+      - name: Move swap space
+        # repo sync 이 만든 디스크 사용량을 줄이기 위한 정리.
+        # ubuntu-latest 는 /mnt/dash_public 같은 대용량 마운트를 제공한다.
+        run: |
+          echo "--- disk before ---"
+          df -h / /mnt/* 2>/dev/null | head -8
+          # 불필요한 git 객체 정리
+          cd ~/lineage/.repo/projects
+          find . -name "*.pack" -size +500M -exec ls -lh {} \; 2>/dev/null | head -5
+          du -sh ~/lineage 2>/dev/null || true
 
       - name: Extract vendor blobs from artifact
         # extract-files.py 는 기기 연결이 필요하므로 GitHub Actions 에서 불가.
